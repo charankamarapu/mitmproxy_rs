@@ -137,7 +137,7 @@ impl<'a> TcpHandler<'a> {
 
             let connection_id = self.connection_id_generator.next_id();
 
-            let data = SocketData {
+            let data: SocketData = SocketData {
                 handle,
                 send_buffer: VecDeque::new(),
                 write_eof: false,
@@ -148,7 +148,7 @@ impl<'a> TcpHandler<'a> {
             self.socket_data.insert(connection_id, data);
             self.active_connections.insert((src_addr, dst_addr));
 
-            let event = TransportEvent::ConnectionEstablished {
+            let event: TransportEvent = TransportEvent::ConnectionEstablished {
                 connection_id,
                 src_addr,
                 dst_addr,
@@ -245,7 +245,7 @@ impl<'a> TcpHandler<'a> {
 
     fn process_tcp(&mut self) -> Result<()> {
         for (connection_id, data) in self.socket_data.iter_mut() {
-            let socket = self.sockets.get_mut::<tcp::Socket>(data.handle);
+            let socket: &mut tcp::Socket<'_> = self.sockets.get_mut::<tcp::Socket>(data.handle);
 
             // receive data over the socket
             if data.recv_waiter.is_some() {
@@ -254,7 +254,7 @@ impl<'a> TcpHandler<'a> {
                     let bytes_available = socket.recv_queue();
 
                     let mut buf = vec![0u8; cmp::min(bytes_available, n as usize)];
-                    let bytes_read = socket.recv_slice(&mut buf)?;
+                    let bytes_read: usize = socket.recv_slice(&mut buf)?;
 
                     buf.truncate(bytes_read);
                     if tx.send(buf).is_err() {

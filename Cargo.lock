@@ -1706,6 +1706,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "tokio-util",
+ "winapi",
  "windows 0.57.0",
  "x25519-dalek",
 ]

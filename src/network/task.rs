@@ -38,14 +38,14 @@ pub fn add_network_layer(
     let (network_events_tx, network_events_rx) = mpsc::channel(256);
     let (network_commands_tx, network_commands_rx) = mpsc::channel(256);
 
-    let task = NetworkTask::new(
+    let task: NetworkTask<'_> = NetworkTask::new(
         network_commands_tx,
         network_events_rx,
         transport_events_tx,
         transport_commands_rx,
         shutdown,
     )?;
-    let h = tokio::spawn(Box::pin(async move { task.run().await }));
+    let h: JoinHandle<std::result::Result<(), anyhow::Error>> = tokio::spawn(Box::pin(async move { task.run().await }));
     Ok((h, network_events_tx, network_commands_rx))
 }
 

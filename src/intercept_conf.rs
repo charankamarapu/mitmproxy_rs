@@ -1,4 +1,11 @@
 use anyhow::{anyhow, ensure};
+use winapi::um::processthreadsapi::OpenProcess;
+use winapi::um::winnt::{HANDLE, PROCESS_QUERY_INFORMATION};
+use winapi::shared::ntdef::NTSTATUS; // Correct import for NTSTATUS
+use winapi::um::handleapi::CloseHandle;
+use winapi::shared::minwindef::{DWORD, ULONG};
+use winapi::ctypes::c_void;
+use winapi::shared::basetsd::ULONG_PTR;
 
 pub type PID = u32;
 
@@ -18,6 +25,29 @@ pub struct InterceptConf {
 enum Action {
     Include(Pattern),
     Exclude(Pattern),
+}
+
+// Define the PROCESS_BASIC_INFORMATION structure
+#[repr(C)]
+pub struct PROCESS_BASIC_INFORMATION {
+    pub ExitStatus: NTSTATUS,
+    pub PebBaseAddress: *mut c_void,
+    pub AffinityMask: ULONG_PTR,
+    pub BasePriority: ULONG,
+    pub UniqueProcessId: HANDLE,
+    pub InheritedFromUniqueProcessId: HANDLE,
+}
+
+// Import the function for querying process information
+#[link(name = "ntdll")]
+extern "system" {
+    pub fn NtQueryInformationProcess(
+        ProcessHandle: HANDLE,
+        ProcessInformationClass: u32,
+        ProcessInformation: *mut c_void,
+        ProcessInformationLength: DWORD,
+        ReturnLength: *mut DWORD,
+    ) -> NTSTATUS;
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -130,7 +160,9 @@ impl InterceptConf {
         for action in &self.actions {
             match action {
                 Action::Include(pattern) => {
-                    intercept = intercept || pattern.matches(process_info);
+                    if pattern.matches(process_info) || self.matches_parent(pattern, process_info.pid) {
+                        intercept = true; // Intercept if it matches or if a parent matches
+                    }
                 }
                 Action::Exclude(pattern) => {
                     intercept = intercept && !pattern.matches(process_info);
@@ -139,6 +171,54 @@ impl InterceptConf {
         }
         intercept
     }
+
+    // Function to check if any parent of the given PID matches the pattern
+    fn matches_parent(&self, pattern: &Pattern, pid: PID) -> bool {
+        let mut current_pid = pid;
+
+        while let Some(parent) = self.get_parent_pid(current_pid) {
+            if pattern.matches(&ProcessInfo {
+                pid: parent,
+                process_name: None, // Or retrieve the actual process name if needed
+            }) {
+                return true; // A matching parent was found
+            }
+            current_pid = parent; // Move up the process tree
+        }
+        false // No matching parent found
+    }
+
+    // Function to get the parent PID of a given PID
+    pub fn get_parent_pid(&self, pid: DWORD) -> Option<DWORD> {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None; // Failed to open process
+            }
+
+            let mut process_basic_info: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
+            let mut return_length: DWORD = 0;
+
+            // Query the process information
+            let status = NtQueryInformationProcess(
+                handle,
+                0, // ProcessBasicInformation
+                &mut process_basic_info as *mut _ as *mut winapi::ctypes::c_void, // Use winapi's c_void
+                std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as DWORD,
+                &mut return_length,
+            );
+
+            CloseHandle(handle);
+
+            // Check for successful status
+            if status == 0 { // This needs to check against STATUS_SUCCESS
+                return Some(process_basic_info.InheritedFromUniqueProcessId as DWORD);
+            }
+        }
+        None // Could not retrieve parent PID
+    }
+
+
 
     pub fn description(&self) -> String {
         if self.actions.is_empty() {

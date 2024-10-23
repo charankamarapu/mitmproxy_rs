@@ -51,6 +51,8 @@ internet-packet = { version = "0.2.0", features = ["smoltcp"] }
 data-encoding = "2.4.0"
 hickory-resolver = "0.24.1"
 socket2 = "0.5.7"
+winapi = { version = "0.3", features = ["winbase", "processthreadsapi", "handleapi", "minwindef", "winnt", "ntstatus"] }
+
 
 [patch.crates-io]
 # tokio = { path = "../tokio/tokio" }

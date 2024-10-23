@@ -39,12 +39,11 @@ impl Device for VirtualDevice {
 
         if let Ok(permit) = self.tx_channel.try_reserve() {
             if let Some(buffer) = self.rx_buffer.pop_front() {
-                let rx = Self::RxToken { buffer };
-                let tx = VirtualTxToken { permit };
+                let rx: VirtualRxToken = Self::RxToken { buffer };
+                let tx: VirtualTxToken<'_> = VirtualTxToken { permit };
                 return Some((rx, tx));
             }
         }
-
         None
     }
 
@@ -72,7 +71,7 @@ impl<'a> TxToken for VirtualTxToken<'a> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let mut buffer = vec![0; len];
+        let mut buffer: Vec<u8> = vec![0; len];
         let result = f(&mut buffer);
 
         match SmolPacket::try_from(buffer) {
