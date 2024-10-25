@@ -176,9 +176,11 @@ impl PacketSourceTask for WindowsTask {
                         log::error!("Skipping invalid packet: {:?}", &self.buf[..len]);
                         continue;
                     };
+
                     // WinDivert packets do not have correct IP checksums yet, we need fix that here
                     // otherwise smoltcp will be unhappy with us.
                     packet.fill_ip_checksum();
+                            
 
                     let event = NetworkEvent::ReceivePacket {
                         packet,

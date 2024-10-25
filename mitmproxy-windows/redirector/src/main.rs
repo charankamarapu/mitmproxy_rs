@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use std::{env, thread};
 use std::sync::Mutex;
-
+use smoltcp::wire::{IpAddress, Ipv4Packet, Ipv4Repr, IpProtocol, Ipv6Packet};
 
 use anyhow::{anyhow, Context, Result};
 use internet_packet::{ConnectionId, InternetPacket, TransportProtocol};
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use windivert::address::WinDivertAddress;
 use windivert::prelude::*;
+use mitmproxy::messages::SmolPacket;
 
 #[derive(Debug)]
 enum Event {
@@ -514,7 +515,7 @@ async fn insert_into_connections(
 }
 
 async fn process_packet(
-    address: WinDivertAddress<NetworkLayer>,
+    mut address: WinDivertAddress<NetworkLayer>,
     mut packet: InternetPacket,
     action: &ConnectionAction,
     inject_handle: &WinDivert<NetworkLayer>,
@@ -560,42 +561,55 @@ async fn process_packet(
                     }
                 }
 
-                let addr: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
-                packet.set_dst_ip(IpAddr::V4(addr));
-                packet.set_src_ip(IpAddr::V4(addr));
+
+                match packet.src_ip() {
+                    IpAddr::V4(_) => {
+                        // Handle IPv4 packet
+                        let ipv4_addr = Ipv4Addr::new(127, 0, 0, 1);
+                        packet.set_dst_ip(IpAddr::V4(ipv4_addr));
+                        packet.set_src_ip(IpAddr::V4(ipv4_addr));
+                    }
+                    IpAddr::V6(_) => {
+                        // Handle IPv6 packet
+                        let ipv6_addr = Ipv6Addr::LOCALHOST;
+                        packet.set_dst_ip(IpAddr::V6(ipv6_addr));
+                        packet.set_src_ip(IpAddr::V6(ipv6_addr));
+                    }
+                }
                 packet.set_dst_port(16789);
 
                 info!(
-                    "Intercepting: {} {} protocol={} outbound={} loopback={}",
+                    "Intercepting: {} {} protocol={} outbound={} loopback={} interface={} sub={}",
                     packet.connection_id(),
                     packet.tcp_flag_str(),
                     packet.protocol(),
                     address.outbound(),
-                    address.loopback()
+                    address.loopback(),
+                    address.interface_index(),
+                    address.subinterface_index()
                 );
 
-                // let buff = packet.clone().inner();
-                // let Ok(mut packet1) = SmolPacket::try_from(buff) else {
-                //     info!("Error converting to SmolPacket");
-                //     return Err(anyhow::anyhow!("Failed to convert to SmolPacket"));
-                // };
+                let buff = packet.clone().inner();
+                let Ok(mut packet1) = SmolPacket::try_from(buff) else {
+                    info!("Error converting to SmolPacket");
+                    return Err(anyhow::anyhow!("Failed to convert to SmolPacket"));
+                };
 
-                // // packet1.fill_ip_checksum();
+                packet1.fill_ip_checksum();
 
+                let buff1 = packet1.into_inner();
 
-                // let buff1 = packet1.into_inner();
-
-                // let packet2 = match InternetPacket::try_from(buff1) {
-                //     Ok(p) => p,
-                //     Err(e) => {
-                //         info!("Error parsing packet: {:?}", e);
-                //         return Err(anyhow::anyhow!("Failed to parse InternetPacket: {:?}", e));
-                //     }
-                // };
+                let packet2 = match InternetPacket::try_from(buff1) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        info!("Error parsing packet: {:?}", e);
+                        return Err(anyhow::anyhow!("Failed to parse InternetPacket: {:?}", e));
+                    }
+                };
 
                 let winpacket = WinDivertPacket::<NetworkLayer> {
                     address,
-                    data: packet.inner().into(),
+                    data: packet2.inner().into(),
                 };
 
                 if let Err(e) = inject_handle.send(&winpacket) {
@@ -604,7 +618,6 @@ async fn process_packet(
                     println!("Packet sent successfully!");
                 }
             } else {
-
                 let src_port = packet.dst_port();
                 let packet_info: PacketInfo  = unsafe {
                     if let Some(ref packet_map) = PACKET_MAP {
@@ -628,38 +641,57 @@ async fn process_packet(
                 packet.set_src_ip(packet_info.dst_ip);
                 packet.set_src_port(packet_info.dst_port);
 
+                packet.recalculate_tcp_checksum();
+
                 info!(
-                    "Intercepting: {} {} protocol={} outbound={} loopback={}",
+                    "Intercepting: {} {} protocol={} outbound={} loopback={} interface={} sub={}",
                     packet.connection_id(),
                     packet.tcp_flag_str(),
                     packet.protocol(),
                     address.outbound(),
-                    address.loopback()
+                    address.loopback(),
+                    address.interface_index(),
+                    address.subinterface_index()
                 );
 
-                // let buff = packet.clone().inner();
+                let mut buff = packet.clone().inner();
+                
+                let mut packet1;
+                match packet.src_ip() {
+                    IpAddr::V4(_) => {
+                        packet1 = Ipv4Packet::new_unchecked(&mut buff)
+                    }
+                    IpAddr::V6(_) => {
+                        return Err(anyhow::anyhow!("Packet map not initialized."));;
+                    }
+                }
+                packet1.fill_checksum();
+                if packet1.verify_checksum() {
+                    println!("IPv4 checksum is valid.");
+                } else {
+                    println!("IPv4 checksum is invalid.");
+                }
 
-                // let Ok(mut packet1) = SmolPacket::try_from(buff) else {
-                //     info!("Error converting to SmolPacket");
-                //     return Err(anyhow::anyhow!("Failed to convert to SmolPacket"));
-                // };
+                let Ok(mut packet1) = SmolPacket::try_from(buff) else {
+                    info!("Error converting to SmolPacket");
+                    return Err(anyhow::anyhow!("Failed to convert to SmolPacket"));
+                };
 
-                // packet1.fill_ip_checksum();
+                packet1.fill_ip_checksum();
 
+                let buff1 = packet1.into_inner().clone();
 
-                // let buff1 = packet1.into_inner();
-
-                // let packet2 = match InternetPacket::try_from(buff1) {
-                //     Ok(p) => p,
-                //     Err(e) => {
-                //         info!("Error parsing packet: {:?}", e);
-                //         return Err(anyhow::anyhow!("Failed to parse InternetPacket: {:?}", e));
-                //     }
-                // };
+                let packet2 = match InternetPacket::try_from(buff1) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        info!("Error parsing packet: {:?}", e);
+                        return Err(anyhow::anyhow!("Failed to parse InternetPacket: {:?}", e));
+                    }
+                };
 
                 let winpacket = WinDivertPacket::<NetworkLayer> {
                     address,
-                    data: packet.inner().into(),
+                    data: packet2.inner().into(),
                 };
 
                 if let Err(e) = inject_handle.send(&winpacket) {
