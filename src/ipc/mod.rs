@@ -15,9 +15,16 @@ impl TryFrom<&Address> for SocketAddr {
 }
 impl From<SocketAddr> for Address {
     fn from(val: SocketAddr) -> Self {
-        Address {
+        let version = if val.is_ipv4() {
+            "4".to_string()
+        } else {
+            "6".to_string()
+        };
+        Address {   
             host: val.ip().to_string(),
             port: val.port() as u32,
+            version: version,
+            src_port: val.port() as u32,
         }
     }
 }

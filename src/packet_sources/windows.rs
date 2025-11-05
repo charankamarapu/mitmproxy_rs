@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use crate::intercept_conf::InterceptConf;
 use crate::ipc;
-use crate::ipc::PacketWithMeta;
+// use crate::ipc::PacketWithMeta;
 use crate::messages::{
     NetworkCommand, NetworkEvent, SmolPacket, TransportCommand, TransportEvent, TunnelInfo,
 };
@@ -137,76 +137,76 @@ impl PacketSourceTask for WindowsTask {
         self.ipc_server.connect().await?;
         log::debug!("IPC connected!");
 
-        loop {
-            tokio::select! {
-                // Monitor the network task for errors or planned shutdown.
-                // This way we implicitly monitor the shutdown broadcast channel.
-                exit = &mut self.network_task_handle => break exit.context("network task panic")?.context("network task error")?,
-                // pipe through changes to the intercept list
-                Some(conf) = self.conf_rx.recv() => {
-                    let msg = ipc::FromProxy {
-                        message: Some(ipc::from_proxy::Message::InterceptConf(conf.into())),
-                    };
-                    msg.encode(&mut self.buf.as_mut_slice())?;
-                    let len = msg.encoded_len();
+        // loop {
+        //     tokio::select! {
+        //         // Monitor the network task for errors or planned shutdown.
+        //         // This way we implicitly monitor the shutdown broadcast channel.
+        //         exit = &mut self.network_task_handle => break exit.context("network task panic")?.context("network task error")?,
+        //         // pipe through changes to the intercept list
+        //         Some(conf) = self.conf_rx.recv() => {
+        //             let msg = ipc::FromProxy {
+        //                 message: Some(ipc::from_proxy::Message::InterceptConf(conf.into())),
+        //             };
+        //             msg.encode(&mut self.buf.as_mut_slice())?;
+        //             let len = msg.encoded_len();
 
-                    self.ipc_server.write_all(&self.buf[..len]).await?;
-                },
-                // read packets from the IPC pipe into our network stack.
-                r = self.ipc_server.read(&mut self.buf) => {
-                    let len = r.context("IPC read error.")?;
-                    if len == 0 {
-                        // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-client
-                        // Because the client is reading from the pipe in message-read mode, it is
-                        // possible for the ReadFile operation to return zero after reading a partial
-                        // message. This happens when the message is larger than the read buffer.
-                        //
-                        // We don't support messages larger than the buffer, so this cannot happen.
-                        // Instead, empty reads indicate that the IPC client has disconnected.
-                        return Err(anyhow!("redirect daemon exited prematurely."));
-                    }
+        //             self.ipc_server.write_all(&self.buf[..len]).await?;
+        //         },
+        //         // read packets from the IPC pipe into our network stack.
+        //         r = self.ipc_server.read(&mut self.buf) => {
+        //             let len = r.context("IPC read error.")?;
+        //             if len == 0 {
+        //                 // https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-client
+        //                 // Because the client is reading from the pipe in message-read mode, it is
+        //                 // possible for the ReadFile operation to return zero after reading a partial
+        //                 // message. This happens when the message is larger than the read buffer.
+        //                 //
+        //                 // We don't support messages larger than the buffer, so this cannot happen.
+        //                 // Instead, empty reads indicate that the IPC client has disconnected.
+        //                 return Err(anyhow!("redirect daemon exited prematurely."));
+        //             }
 
-                    let mut cursor = Cursor::new(&self.buf[..len]);
-                    let Ok(PacketWithMeta { data, tunnel_info: Some(ipc::TunnelInfo { pid, process_name })}) = PacketWithMeta::decode(&mut cursor) else {
-                        return Err(anyhow!("Received invalid IPC message: {:?}", &self.buf[..len]));
-                    };
-                    assert_eq!(cursor.position(), len as u64);
+        //             let mut cursor = Cursor::new(&self.buf[..len]);
+        //             let Ok(PacketWithMeta { data, tunnel_info: Some(ipc::TunnelInfo { pid, process_name })}) = PacketWithMeta::decode(&mut cursor) else {
+        //                 return Err(anyhow!("Received invalid IPC message: {:?}", &self.buf[..len]));
+        //             };
+        //             assert_eq!(cursor.position(), len as u64);
 
-                    let Ok(mut packet) = SmolPacket::try_from(data) else {
-                        log::error!("Skipping invalid packet: {:?}", &self.buf[..len]);
-                        continue;
-                    };
+        //             let Ok(mut packet) = SmolPacket::try_from(data) else {
+        //                 log::error!("Skipping invalid packet: {:?}", &self.buf[..len]);
+        //                 continue;
+        //             };
 
-                    // WinDivert packets do not have correct IP checksums yet, we need fix that here
-                    // otherwise smoltcp will be unhappy with us.
-                    packet.fill_ip_checksum();
+        //             // WinDivert packets do not have correct IP checksums yet, we need fix that here
+        //             // otherwise smoltcp will be unhappy with us.
+        //             packet.fill_ip_checksum();
                             
 
-                    let event = NetworkEvent::ReceivePacket {
-                        packet,
-                        tunnel_info: TunnelInfo::LocalRedirector {
-                            pid,
-                            process_name,
-                            remote_endpoint: None,
-                        },
-                    };
-                    if self.net_tx.try_send(event).is_err() {
-                        log::warn!("Dropping incoming packet, TCP channel is full.")
-                    };
-                },
-                // write packets from the network stack to the IPC pipe to be reinjected.
-                Some(e) = self.net_rx.recv() => {
-                    match e {
-                        NetworkCommand::SendPacket(packet) => {
-                            let packet = ipc::FromProxy { message: Some(ipc::from_proxy::Message::Packet( ipc::Packet { data: packet.into_inner() }))};
-                            packet.encode(&mut self.buf.as_mut_slice())?;
-                            let len = packet.encoded_len();
-                            self.ipc_server.write_all(&self.buf[..len]).await?;
-                        }
-                    }
-                }
-            }
-        }
+        //             let event = NetworkEvent::ReceivePacket {
+        //                 packet,
+        //                 tunnel_info: TunnelInfo::LocalRedirector {
+        //                     pid,
+        //                     process_name,
+        //                     remote_endpoint: None,
+        //                 },
+        //             };
+        //             if self.net_tx.try_send(event).is_err() {
+        //                 log::warn!("Dropping incoming packet, TCP channel is full.")
+        //             };
+        //         },
+        //         // write packets from the network stack to the IPC pipe to be reinjected.
+        //         Some(e) = self.net_rx.recv() => {
+        //             match e {
+        //                 NetworkCommand::SendPacket(packet) => {
+        //                     let packet = ipc::FromProxy { message: Some(ipc::from_proxy::Message::Packet( ipc::Packet { data: packet.into_inner() }))};
+        //                     packet.encode(&mut self.buf.as_mut_slice())?;
+        //                     let len = packet.encoded_len();
+        //                     self.ipc_server.write_all(&self.buf[..len]).await?;
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
         log::info!("Windows OS proxy task shutting down.");
         Ok(())

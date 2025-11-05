@@ -35,6 +35,8 @@ publish.workspace = true
 anyhow = { version = "1.0.89", features = ["backtrace"] }
 log = "0.4.22"
 once_cell = "1"
+uds_windows = "1.1.0"
+miow = "0.6"
 pretty-hex = "0.4.1"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 smoltcp = "0.11"

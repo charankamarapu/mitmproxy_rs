@@ -15,6 +15,13 @@ pub struct ProcessInfo {
     pub process_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct IncomingTrafficInfo {
+    pub is_open_event_sent: bool,
+    pub written_bytes: u32,
+    pub read_bytes: u32,
+}
+
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct InterceptConf {
     default: bool,
@@ -156,11 +163,12 @@ impl InterceptConf {
     }
 
     pub fn should_intercept(&self, process_info: &ProcessInfo) -> bool {
-        let mut intercept = self.default;
+        let mut intercept = false;
         for action in &self.actions {
             match action {
                 Action::Include(pattern) => {
-                    if pattern.matches(process_info) || self.matches_parent(pattern, process_info.pid) {
+                    // if pattern.matches(process_info) || self.matches_parent(pattern, process_info.pid) {
+                    if self.matches_parent(pattern, process_info.pid) {
                         intercept = true; // Intercept if it matches or if a parent matches
                     }
                 }
@@ -175,6 +183,7 @@ impl InterceptConf {
     // Function to check if any parent of the given PID matches the pattern
     fn matches_parent(&self, pattern: &Pattern, pid: PID) -> bool {
         let mut current_pid = pid;
+        let mut counter = 0;
 
         while let Some(parent) = self.get_parent_pid(current_pid) {
             if pattern.matches(&ProcessInfo {
@@ -184,8 +193,13 @@ impl InterceptConf {
                 return true; // A matching parent was found
             }
             current_pid = parent; // Move up the process tree
+            counter += 1; // Increment the counter
+
+            if counter >= 10 {
+                break; // Exit the loop if we’ve reached 10 iterations
+            }
         }
-        false // No matching parent found
+        return false // No matching parent found
     }
 
     // Function to get the parent PID of a given PID
