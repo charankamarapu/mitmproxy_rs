@@ -229,6 +229,7 @@ async fn main() -> Result<()> {
                     },
                     None => {
                         
+                            println!("Captured incoming packet: {} (flags={} size={})", packet.connection_id(), packet.tcp_flag_str(), packet.payload().len());
                             info!(
                                 "Received packet: {} {} {}",
                             packet.connection_id(),
@@ -243,6 +244,7 @@ async fn main() -> Result<()> {
                                     if packet.dst_port() == APP_PORT {
                                         info!("well atleast this worked");
                                         info!("read this first{} {}", packet.connection_id().src, packet.protocol());
+                                        println!("Registering active listener for {} proto={:?}", packet.connection_id().src, packet.protocol());
                                         active_listeners.insert(
                                             packet.connection_id().src,
                                             packet.protocol(),
@@ -392,6 +394,7 @@ async fn main() -> Result<()> {
 
                         if state.should_intercept(&proc_info) {
                             unsafe {
+                                println!("Setting app port to {}", address.local_port());
                                 APP_PORT = address.local_port();
                             }
                         }
@@ -582,6 +585,7 @@ async fn process_packet(
     match action {
         ConnectionAction::InterceptIncoming => {
             unsafe {
+                println!("Handling InterceptIncoming for {} (dst_port={})", packet.connection_id(), packet.dst_port());
                 if packet.dst_port() == APP_PORT {
                     
                     let mut incoming_traffic_info: IncomingTrafficInfo;
@@ -599,6 +603,7 @@ async fn process_packet(
                                 time_stamp_nano: address.event_timestamp() as u64,
                             })),
                         });
+                        println!("Sent SocketOpenEvent for {} ts={}", packet.connection_id(), address.event_timestamp());
                         incoming_traffic_info.is_open_event_sent = true
                     }
 
@@ -625,13 +630,14 @@ async fn process_packet(
                                             direction: true,
                                             validate_read_bytes: incoming_traffic_info.read_bytes as i64,
                                             validate_written_bytes: incoming_traffic_info.written_bytes as i64,
-                                            msg_size: tcp_payload.len() as u32,
+                                            msg_size: tcp_payload.len() as u64,
                                             msg: tcp_payload,
                                         }
                                     )
                                 )
                             }
                         );
+                        println!("Sent SocketDataEvent (incoming) for {} bytes={} ts={}", packet.connection_id(), no_of_bytes, address.event_timestamp());
                     }
                     active_listeners.insert(packet.connection_id().src, packet.protocol(), incoming_traffic_info);
                 }
@@ -664,13 +670,14 @@ async fn process_packet(
                                             direction: false,
                                             validate_read_bytes: incoming_traffic_info.read_bytes as i64,
                                             validate_written_bytes: incoming_traffic_info.written_bytes as i64,
-                                            msg_size: tcp_payload.len() as u32,
+                                            msg_size: tcp_payload.len() as u64,
                                             msg: tcp_payload,
                                         }
                                     )
                                 )
                             }
                         );
+                        println!("Sent SocketDataEvent (outgoing) for {} bytes={} ts={}", packet.connection_id(), no_of_bytes, address.event_timestamp());
                     incoming_traffic_info.read_bytes = 0;
                     incoming_traffic_info.written_bytes = 0;
                     active_listeners.insert(packet.connection_id().dst, packet.protocol(), incoming_traffic_info);

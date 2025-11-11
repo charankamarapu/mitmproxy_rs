@@ -98,8 +98,8 @@ pub struct SocketDataEvent {
     pub pid: u32,
     #[prost(bool, tag="4")]
     pub direction: bool,
-    #[prost(uint32, tag="5")]
-    pub msg_size: u32,
+    #[prost(uint64, tag="5")]
+    pub msg_size: u64,
     #[prost(bytes="vec", tag="6")]
     pub msg: ::prost::alloc::vec::Vec<u8>,
     #[prost(int64, tag="7")]
