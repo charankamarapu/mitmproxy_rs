@@ -8,24 +8,31 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[lib]
+name = "windows_redirector"
+crate-type = ["cdylib", "staticlib"]
+
+[[bin]]
+name = "windows-redirector"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [target.'cfg(windows)'.dependencies]
-mitmproxy = { path = "../../" }
 tokio = { version = "1.40", features = ["macros", "net", "rt-multi-thread", "sync", "io-util"] }
 anyhow = { version = "1.0.89", features = ["backtrace"] }
 windivert = "0.6.0"
 lru_time_cache = "0.11.11"
 log = "0.4.22"
 env_logger = "0.11.5"
-prost = "0.13.3"
 smoltcp = "0.9.0"
-uds_windows = "1.1.0"
-miow = "0.6"
 internet-packet = { version = "0.2.0", features = ["checksums"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+once_cell = "1.19"
 
 [target.'cfg(windows)'.dev-dependencies]
 hex = "0.4.3"
