@@ -11,6 +11,8 @@ pub struct InterceptConf {
     pub default: bool,
     #[prost(string, repeated, tag="2")]
     pub actions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, tag="3")]
+    pub agent_pid: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Message {

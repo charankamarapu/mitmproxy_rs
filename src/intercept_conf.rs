@@ -26,6 +26,8 @@ pub struct IncomingTrafficInfo {
 pub struct InterceptConf {
     default: bool,
     actions: Vec<Action>,
+    client_pid: Option<PID>,
+    agent_pid: Option<PID>,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -147,11 +149,47 @@ impl std::fmt::Display for Pattern {
 impl InterceptConf {
     fn new(actions: Vec<Action>) -> Self {
         let default = matches!(actions.first(), Some(Action::Exclude(_)));
-        Self { default, actions }
+        Self { 
+            default, 
+            actions,
+            client_pid: None,
+            agent_pid: None,
+        }
+    }
+
+    fn new_with_pids(actions: Vec<Action>, client_pid: Option<PID>, agent_pid: Option<PID>) -> Self {
+        let default = matches!(actions.first(), Some(Action::Exclude(_)));
+        Self { 
+            default, 
+            actions,
+            client_pid,
+            agent_pid,
+        }
     }
 
     pub fn disabled() -> Self {
         Self::new(vec![])
+    }
+
+    pub fn set_agent_pid(&mut self, agent_pid: PID) {
+        self.agent_pid = Some(agent_pid);
+    }
+
+    pub fn set_client_pid(&mut self, client_pid: PID) {
+        self.client_pid = Some(client_pid);
+    }
+
+    pub fn agent_pid(&self) -> Option<PID> {
+        self.agent_pid
+    }
+
+    pub fn client_pid(&self) -> Option<PID> {
+        self.client_pid
+    }
+
+    /// Check if the given PID is the agent PID
+    pub fn is_agent_pid(&self, pid: PID) -> bool {
+        self.agent_pid.map(|agent| agent == pid).unwrap_or(false)
     }
 
     pub fn actions(&self) -> Vec<String> {
@@ -242,7 +280,7 @@ impl InterceptConf {
             .actions
             .iter()
             .map(|a| match a {
-                Action::Include(Pattern::Pid(pid)) => format!("Include PID {}.", pid),
+                Action::Include(Pattern::Pid(pid)) => format!("Include PID {}, Agent PID {}.", pid , self.agent_pid.unwrap_or(0)),
                 Action::Include(Pattern::Process(name)) => {
                     format!("Include processes matching \"{}\".", name)
                 }

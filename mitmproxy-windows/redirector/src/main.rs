@@ -1,5 +1,5 @@
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use std::{env, thread};
@@ -174,6 +174,8 @@ async fn main() -> Result<()> {
         Duration::from_secs(60 * 10),
     );
     let mut active_listeners: ActiveListeners = ActiveListeners::new();
+    // Track ephemeral ports bound by the agent PID
+    let mut agent_ephemeral_ports: HashSet<u16> = HashSet::new();
 
     loop {
         let result = event_rx.recv().await.unwrap();
@@ -210,7 +212,7 @@ async fn main() -> Result<()> {
                                     );
                                 }
                             }
-                            process_packet(address, packet, s, &inject_handle, &mut ipc_tx, &mut active_listeners)
+                            process_packet(address, packet, s, &inject_handle, &mut ipc_tx, &mut active_listeners, &agent_ephemeral_ports)
                             .await?;
                         }
                         ConnectionState::Unknown(packets) => {
@@ -267,10 +269,11 @@ async fn main() -> Result<()> {
                                 &mut connections,
                                 &inject_handle,
                                 &mut ipc_tx,
-                                &mut active_listeners
+                                &mut active_listeners,
+                                &agent_ephemeral_ports,
                             )
                             .await?;
-                            process_packet(address, packet, &action, &inject_handle, &mut ipc_tx, &mut active_listeners)
+                            process_packet(address, packet, &action, &inject_handle, &mut ipc_tx, &mut active_listeners, &agent_ephemeral_ports)
                             .await?;
 
                     }
@@ -373,7 +376,8 @@ async fn main() -> Result<()> {
                             &mut connections,
                             &inject_handle,
                             &mut ipc_tx,
-                            &mut active_listeners
+                            &mut active_listeners,
+                            &agent_ephemeral_ports,
                         )
                         .await?;
                     }
@@ -399,6 +403,17 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                    WinDivertEvent::SocketBind => {
+                        // Track ephemeral ports bound by the agent process
+                        let pid = address.process_id();
+                        if let Some(agent_pid) = state.agent_pid() {
+                            if pid == agent_pid {
+                                let port = address.local_port();
+                                info!("Agent bound ephemeral port {} (pid={})", port, pid);
+                                agent_ephemeral_ports.insert(port);
+                            }
+                        }
+                    }
                     WinDivertEvent::SocketClose => {
                         // We cannot clean up here because there are still final packets on connections after this event,
                         // But at least we can release memory for unknown connections.
@@ -410,6 +425,11 @@ async fn main() -> Result<()> {
 
                         // There might be listen sockets we can clean up.
                         // active_listeners.remove(connection_id.src, proto);
+                        // If the agent closed a bound ephemeral port, remove it from the map.
+                        let closed_port = address.local_port();
+                        if agent_ephemeral_ports.remove(&closed_port) {
+                            info!("Removed agent ephemeral port {} on close", closed_port);
+                        }
                     }
                     _ => {}
                 }
@@ -530,6 +550,7 @@ async fn insert_into_connections(
     inject_handle: &WinDivert<NetworkLayer>,
     ipc_tx: &mut UnboundedSender<ipc::Message>,
     active_listeners: &mut ActiveListeners,
+    agent_ephemeral_ports: &HashSet<u16>,
 ) -> Result<()> {
     debug!("Adding: {} with {:?} ({:?})", &connection_id, action, event);
     // no matter which action we do, the reverse direction is whitelisted.
@@ -547,11 +568,20 @@ async fn insert_into_connections(
             }
             new_connection_id.src.set_port(16789);
         }
+        ConnectionAction::InterceptIncoming => {
+            // Redirect incoming connections to port 3000 on localhost
+            if connection_id.src.is_ipv6() {
+                new_connection_id.src.set_ip(IpAddr::V6(Ipv6Addr::LOCALHOST));
+                new_connection_id.dst.set_ip(IpAddr::V6(Ipv6Addr::LOCALHOST));
+            } else {
+                new_connection_id.src.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+                new_connection_id.dst.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            }
+            new_connection_id.src.set_port(3000);
+            info!("Setting up reverse connection for incoming intercept to port 3000");
+        }
         ConnectionAction::None => {
             info!("expected");
-        }
-        ConnectionAction::InterceptIncoming => {
-            info!("expected yes");
         }
     }
 
@@ -563,12 +593,12 @@ async fn insert_into_connections(
 
     if let Some(ConnectionState::Unknown(packets)) = existing1 {
         for (a, p) in packets {
-            process_packet(a, p, action, inject_handle, ipc_tx, active_listeners).await?;
+            process_packet(a, p, action, inject_handle, ipc_tx, active_listeners, agent_ephemeral_ports).await?;
         }
     }
     if let Some(ConnectionState::Unknown(packets)) = existing2 {
         for (a, p) in packets {
-            process_packet(a, p, action, inject_handle, ipc_tx, active_listeners).await?;
+            process_packet(a, p, action, inject_handle, ipc_tx, active_listeners, agent_ephemeral_ports).await?;
         }
     }
     Ok(())
@@ -581,123 +611,171 @@ async fn process_packet(
     inject_handle: &WinDivert<NetworkLayer>,
     ipc_tx: &mut UnboundedSender<ipc::Message>,
     active_listeners: &mut ActiveListeners,
+    agent_ephemeral_ports: &HashSet<u16>,
 ) -> Result<()> {
     match action {
         ConnectionAction::InterceptIncoming => {
             unsafe {
                 println!("Handling InterceptIncoming for {} (dst_port={})", packet.connection_id(), packet.dst_port());
-                if packet.dst_port() == APP_PORT {
-                    
-                    let mut incoming_traffic_info: IncomingTrafficInfo;
-                    info!("read this {} {}", packet.connection_id().src, packet.protocol());
-                    if let Some(info) = active_listeners.get(packet.connection_id().src, packet.protocol()) {
-                        incoming_traffic_info = info.clone();
-                    } else {
-                        return Err(anyhow::anyhow!("Failed to get incoming info"));
-                    }
+                
+                info!(
+                    "Intercepting incoming: {} {} protocol={} outbound={} loopback={}",
+                    packet.connection_id(),
+                    packet.tcp_flag_str(),
+                    packet.protocol(),
+                    address.outbound(),
+                    address.loopback()
+                );
 
-                    if !incoming_traffic_info.is_open_event_sent{
-                        let _ = ipc_tx.send(ipc::Message {
-                            message: Some(ipc::message::Message::SocketOpenEvent(ipc::SocketOpenEvent {
-                                pid: 1,
-                                time_stamp_nano: address.event_timestamp() as u64,
-                            })),
-                        });
-                        println!("Sent SocketOpenEvent for {} ts={}", packet.connection_id(), address.event_timestamp());
-                        incoming_traffic_info.is_open_event_sent = true
-                    }
-
-                    let mut ip_packet_buffer = packet.clone().inner();
-                    let tcp_payload = if let Ok(Some(payload)) = extract_tcp_payload(&packet, &mut ip_packet_buffer[..]) {
-                        println!("TCP Payload: {:?}", payload);
-                        payload.to_vec() // If we successfully extract payload, use it
-                    } else {
-                        println!("Failed to extract TCP payload.");
-                        vec![]  // Provide an empty Vec<u8> as fallback
-                    };
-
-                    if tcp_payload.len() != 0 && !(tcp_payload.len() == 1 && tcp_payload[0] == 0) {
-                        let no_of_bytes = tcp_payload.len() as u32;
-                        incoming_traffic_info.read_bytes = incoming_traffic_info.read_bytes + no_of_bytes;
-                        let _ = ipc_tx.send(
-                            ipc::Message{
-                                message: Some(
-                                    ipc::message::Message::SocketDataEvent(
-                                        ipc::SocketDataEvent {
-                                            entry_time_stamp_nano: address.event_timestamp() as u64,
-                                            time_stamp_nano: address.event_timestamp() as u64,
-                                            pid: 1,
-                                            direction: true,
-                                            validate_read_bytes: incoming_traffic_info.read_bytes as i64,
-                                            validate_written_bytes: incoming_traffic_info.written_bytes as i64,
-                                            msg_size: tcp_payload.len() as u64,
-                                            msg: tcp_payload,
-                                        }
-                                    )
-                                )
-                            }
-                        );
-                        println!("Sent SocketDataEvent (incoming) for {} bytes={} ts={}", packet.connection_id(), no_of_bytes, address.event_timestamp());
-                    }
-                    active_listeners.insert(packet.connection_id().src, packet.protocol(), incoming_traffic_info);
+                // If this packet is destined to the app port but its source port
+                // is one of the agent's ephemeral ports, do not intercept it here.
+                if packet.dst_port() == APP_PORT && agent_ephemeral_ports.contains(&packet.src_port()) {
+                    debug!("Skipping intercept for packet from agent ephemeral port {}", packet.src_port());
+                    inject_handle
+                        .send(&WinDivertPacket::<NetworkLayer> {
+                            address,
+                            data: packet.inner().into(),
+                        })
+                        .context("failed to re-inject packet")?;
+                    return Ok(());
                 }
-                if packet.src_port() == APP_PORT {
-                    let mut incoming_traffic_info: IncomingTrafficInfo;
-                    if let Some(info) = active_listeners.get(packet.connection_id().dst, packet.protocol()) {
-                        incoming_traffic_info = info.clone();
-                    } else {
-                        return Err(anyhow::anyhow!("Failed to get incoming info SRC"));
-                    }
-                    let mut ip_packet_buffer = packet.clone().inner();
-                    let tcp_payload = if let Ok(Some(payload)) = extract_tcp_payload(&packet, &mut ip_packet_buffer[..]) {
-                        println!("TCP Payload: {:?}", payload);
-                        payload.to_vec() // If we successfully extract payload, use it
-                    } else {
-                        println!("Failed to extract TCP payload.");
-                        vec![]  // Provide an empty Vec<u8> as fallback
+
+                if packet.dst_port() == APP_PORT {
+                    // Store original packet info for reverse direction
+                    let src_port = packet.src_port();
+                    let packet_info = PacketInfo {
+                        src_ip: packet.src_ip(),
+                        dst_ip: packet.dst_ip(),
+                        dst_port: packet.dst_port(),
                     };
-                    if tcp_payload.len() != 0 && !(tcp_payload.len() == 1 && tcp_payload[0] == 0) {
-                        let no_of_bytes = tcp_payload.len() as u32;
-                        incoming_traffic_info.written_bytes = incoming_traffic_info.written_bytes + no_of_bytes;
-                        let _ = ipc_tx.send(
-                            ipc::Message{
-                                message: Some(
-                                    ipc::message::Message::SocketDataEvent(
-                                        ipc::SocketDataEvent {
-                                            entry_time_stamp_nano: address.event_timestamp() as u64,
-                                            time_stamp_nano: address.event_timestamp() as u64,
-                                            pid: 1,
-                                            direction: false,
-                                            validate_read_bytes: incoming_traffic_info.read_bytes as i64,
-                                            validate_written_bytes: incoming_traffic_info.written_bytes as i64,
-                                            msg_size: tcp_payload.len() as u64,
-                                            msg: tcp_payload,
-                                        }
-                                    )
-                                )
-                            }
-                        );
-                        println!("Sent SocketDataEvent (outgoing) for {} bytes={} ts={}", packet.connection_id(), no_of_bytes, address.event_timestamp());
-                    incoming_traffic_info.read_bytes = 0;
-                    incoming_traffic_info.written_bytes = 0;
-                    active_listeners.insert(packet.connection_id().dst, packet.protocol(), incoming_traffic_info);
+                    
+                    if let Some(ref packet_map) = PACKET_MAP {
+                        let mut map = packet_map.lock().unwrap();
+                        map.insert(src_port, packet_info);
                     }
+
+                    // Redirect to port 3000 on localhost
+                    match packet.src_ip() {
+                        IpAddr::V4(_) => {
+                            let ipv4_addr = Ipv4Addr::new(127, 0, 0, 1);
+                            packet.set_dst_ip(IpAddr::V4(ipv4_addr));
+                            packet.set_src_ip(IpAddr::V4(ipv4_addr));
+                        }
+                        IpAddr::V6(_) => {
+                            let ipv6_addr = Ipv6Addr::LOCALHOST;
+                            packet.set_dst_ip(IpAddr::V6(ipv6_addr));
+                            packet.set_src_ip(IpAddr::V6(ipv6_addr));
+                        }
+                    }
+                    packet.set_dst_port(3000);
+                    packet.recalculate_tcp_checksum();
+
+                    info!(
+                        "Redirected incoming to port 3000: {} {} interface={} sub={}",
+                        packet.connection_id(),
+                        packet.tcp_flag_str(),
+                        address.interface_index(),
+                        address.subinterface_index()
+                    );
+
+                    let buff = packet.clone().inner();
+                    let Ok(mut packet1) = SmolPacket::try_from(buff) else {
+                        info!("Error converting to SmolPacket");
+                        return Err(anyhow::anyhow!("Failed to convert to SmolPacket"));
+                    };
+
+                    packet1.fill_ip_checksum();
+                    let buff1 = packet1.into_inner();
+
+                    let packet2 = match InternetPacket::try_from(buff1) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            info!("Error parsing packet: {:?}", e);
+                            return Err(anyhow::anyhow!("Failed to parse InternetPacket: {:?}", e));
+                        }
+                    };
+
+                    let winpacket = WinDivertPacket::<NetworkLayer> {
+                        address,
+                        data: packet2.inner().into(),
+                    };
+
+                    if let Err(e) = inject_handle.send(&winpacket) {
+                        eprintln!("Failed to send packet: {:?}", e);
+                    } else {
+                        println!("Packet sent successfully to port 3000!");
+                    }
+                } else if packet.src_port() == 3000 {
+                    // Restore original addresses for response packets from port 3000
+                    let dst_port = packet.dst_port();
+                    let packet_info = if let Some(ref packet_map) = PACKET_MAP {
+                        let map = packet_map.lock().unwrap();
+                        if let Some(packet_info) = map.get(&dst_port) {
+                            packet_info.clone()
+                        } else {
+                            return Err(anyhow::anyhow!("Failed to get packet info for port: {}", dst_port));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("Packet map not initialized."));
+                    };
+
+                    packet.set_src_ip(packet_info.dst_ip);
+                    packet.set_dst_ip(packet_info.src_ip);
+                    packet.set_src_port(packet_info.dst_port);
+                    packet.recalculate_tcp_checksum();
+
+                    info!(
+                        "Restored response from port 3000: {} {} interface={} sub={}",
+                        packet.connection_id(),
+                        packet.tcp_flag_str(),
+                        address.interface_index(),
+                        address.subinterface_index()
+                    );
+
+                    let buff = packet.clone().inner();
+                    let Ok(mut packet1) = SmolPacket::try_from(buff) else {
+                        info!("Error converting to SmolPacket");
+                        return Err(anyhow::anyhow!("Failed to convert to SmolPacket"));
+                    };
+
+                    packet1.fill_ip_checksum();
+                    let buff1 = packet1.into_inner();
+
+                    let packet2 = match InternetPacket::try_from(buff1) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            info!("Error parsing packet: {:?}", e);
+                            return Err(anyhow::anyhow!("Failed to parse InternetPacket: {:?}", e));
+                        }
+                    };
+
+                    let winpacket = WinDivertPacket::<NetworkLayer> {
+                        address,
+                        data: packet2.inner().into(),
+                    };
+
+                    if let Err(e) = inject_handle.send(&winpacket) {
+                        eprintln!("Failed to send packet: {:?}", e);
+                    } else {
+                        println!("Response packet sent successfully!");
+                    }
+                } else {
+                    // Forward other packets unchanged
+                    debug!(
+                        "Forwarding unchanged: {} {} outbound={} loopback={}",
+                        packet.connection_id(),
+                        packet.tcp_flag_str(),
+                        address.outbound(),
+                        address.loopback()
+                    );
+                    inject_handle
+                        .send(&WinDivertPacket::<NetworkLayer> {
+                            address,
+                            data: packet.inner().into(),
+                        })
+                        .context("failed to re-inject packet")?;
                 }
             }
-
-            debug!(
-                "Forwarding: {} {} outbound={} loopback={}",
-                packet.connection_id(),
-                packet.tcp_flag_str(),
-                address.outbound(),
-                address.loopback()
-            );
-            inject_handle
-                .send(&WinDivertPacket::<NetworkLayer> {
-                    address,
-                    data: packet.inner().into(),
-                })
-                .context("failed to re-inject packet")?;
         }
         ConnectionAction::None => {
             debug!(
