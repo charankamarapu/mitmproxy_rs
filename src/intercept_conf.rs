@@ -28,6 +28,8 @@ pub struct InterceptConf {
     actions: Vec<Action>,
     client_pid: Option<PID>,
     agent_pid: Option<PID>,
+    // mode of interception: record or test
+    mode: Mode,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -79,6 +81,27 @@ impl Pattern {
     }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub enum Mode {
+    Record,
+    Test,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Test
+    }
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Mode::Record => write!(f, "record"),
+            Mode::Test => write!(f, "test"),
+        }
+    }
+}
+
 impl TryFrom<&str> for InterceptConf {
     type Error = anyhow::Error;
 
@@ -87,8 +110,9 @@ impl TryFrom<&str> for InterceptConf {
         if val.is_empty() {
             return Ok(InterceptConf::new(vec![]));
         }
-        let actions: Vec<&str> = val.split(',').collect();
-        InterceptConf::try_from(actions).map_err(|_| anyhow!("invalid intercept spec: {}", value))
+        // split tokens by comma; tokens may include a mode token like `mode=record` or `mode=test`
+        let tokens: Vec<&str> = val.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        InterceptConf::try_from(tokens).map_err(|_| anyhow!("invalid intercept spec: {}", value))
     }
 }
 
@@ -96,11 +120,30 @@ impl<T: AsRef<str>> TryFrom<Vec<T>> for InterceptConf {
     type Error = anyhow::Error;
 
     fn try_from(value: Vec<T>) -> Result<Self, Self::Error> {
-        let actions = value
+        let mut mode: Mode = Mode::default();
+        let mut action_tokens: Vec<String> = Vec::new();
+
+        for item in value.into_iter() {
+            let s = item.as_ref().trim();
+            if s.is_empty() {
+                return Err(anyhow!("empty token in intercept spec"));
+            }
+            if let Some(rest) = s.strip_prefix("mode=") {
+                match rest.to_ascii_lowercase().as_str() {
+                    "record" => mode = Mode::Record,
+                    "test" => mode = Mode::Test,
+                    other => return Err(anyhow!("invalid mode: {}", other)),
+                }
+            } else {
+                action_tokens.push(s.to_string());
+            }
+        }
+
+        let actions = action_tokens
             .into_iter()
             .map(|a| Action::try_from(a.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(InterceptConf::new(actions))
+        Ok(InterceptConf::new_with_mode(actions, None, None, mode))
     }
 }
 
@@ -154,6 +197,7 @@ impl InterceptConf {
             actions,
             client_pid: None,
             agent_pid: None,
+            mode: Mode::default(),
         }
     }
 
@@ -164,6 +208,18 @@ impl InterceptConf {
             actions,
             client_pid,
             agent_pid,
+            mode: Mode::default(),
+        }
+    }
+
+    fn new_with_mode(actions: Vec<Action>, client_pid: Option<PID>, agent_pid: Option<PID>, mode: Mode) -> Self {
+        let default = matches!(actions.first(), Some(Action::Exclude(_)));
+        Self {
+            default,
+            actions,
+            client_pid,
+            agent_pid,
+            mode,
         }
     }
 
@@ -194,6 +250,11 @@ impl InterceptConf {
 
     pub fn actions(&self) -> Vec<String> {
         self.actions.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// Return the configured mode
+    pub fn mode(&self) -> Mode {
+        self.mode.clone()
     }
 
     pub fn default(&self) -> bool {

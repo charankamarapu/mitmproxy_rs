@@ -35,6 +35,7 @@ impl From<intercept_conf::InterceptConf> for InterceptConf {
             default: conf.default(),
             actions: conf.actions(),
             agent_pid: conf.agent_pid().unwrap_or(0),
+            mode: conf.mode().to_string(),
         }
     }
 }
@@ -43,7 +44,12 @@ impl TryFrom<InterceptConf> for intercept_conf::InterceptConf {
     type Error = anyhow::Error;
 
     fn try_from(conf: InterceptConf) -> Result<Self, Self::Error> {
-        let mut intercept_conf = intercept_conf::InterceptConf::try_from(conf.actions)?;
+        let mut tokens: Vec<String> = conf.actions.iter().cloned().collect();
+        // include mode token so TryFrom<Vec<T>> in intercept_conf will parse it
+        if !conf.mode.is_empty() {
+            tokens.push(format!("mode={}", conf.mode));
+        }
+        let mut intercept_conf = intercept_conf::InterceptConf::try_from(tokens)?;
         
         // Set agent_pid if it's not 0 (protobuf default)
         if conf.agent_pid != 0 {

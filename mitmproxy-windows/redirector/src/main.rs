@@ -11,7 +11,7 @@ use anyhow::{anyhow, Context, Result};
 use internet_packet::{ConnectionId, InternetPacket, TransportProtocol};
 use log::{debug, error, info, warn};
 use lru_time_cache::LruCache;
-use mitmproxy::intercept_conf::{InterceptConf, ProcessInfo, IncomingTrafficInfo};
+use mitmproxy::intercept_conf::{InterceptConf, ProcessInfo, IncomingTrafficInfo, Mode};
 use prost::Message;
 use mitmproxy::ipc;
 use mitmproxy::packet_sources::windows::IPC_BUF_SIZE;
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
                             let action: ConnectionAction = {
                                 unsafe {
                                     info!("well atleast this worked {} {}", APP_PORT, packet.dst_port());
-                                    if packet.dst_port() == APP_PORT {
+                                            if packet.dst_port() == APP_PORT {
                                         info!("well atleast this worked");
                                         info!("read this first{} {}", packet.connection_id().src, packet.protocol());
                                         println!("Registering active listener for {} proto={:?}", packet.connection_id().src, packet.protocol());
@@ -255,7 +255,13 @@ async fn main() -> Result<()> {
                                                 written_bytes: 0,
                                                 read_bytes: 0,
                                              });
-                                       ConnectionAction::InterceptIncoming
+                                                // Only intercept incoming when mode is Record. In Test mode, pass through.
+                                                if state.mode() == Mode::Record {
+                                                    ConnectionAction::InterceptIncoming
+                                                } else {
+                                                    debug!("Skipping incoming intercept in test mode");
+                                                    ConnectionAction::None
+                                                }
                                     } else {
                                         debug!("Unknown inbound packet. Passing through.");
                                         ConnectionAction::None
